@@ -1,0 +1,28 @@
+{
+  "billing_period_end_days": [14, "last"],
+  "timezone": "America/New_York",
+
+  "target_hours": 54,
+  "hourly_rate": 0,
+
+  "notion_database_id": "bdee81ae7ce84375b0f340e7895828ac",
+  "notion_hours_property": "Time (Hrs)",
+  "notion_date_property": "Start",
+  "notion_end_property": "End",
+  "notion_agent_property": "Agent",
+  "notion_agent_user_id": "e2490ed9-4a99-4203-b2f3-eca46ed42c7c",
+  "notion_exclude_today": true,
+  "notion_exclude_client_names": ["JadePuma Apps"],
+  "notion_exclude_client_ids": ["59c6169f-08fb-4a17-901e-4c375bf18d7b"],
+  "notion_refresh_minutes": 15,
+
+  "show_hours_line": true,
+  "show_earnings_line": true,
+
+  "always_on_top": false,
+  "opacity": 0.85,
+  "font_family": "Segoe UI",
+  "font_size": 10,
+  "fg_color": "#e6e6e6",
+  "bg_color": "#1e1e1e"
+}

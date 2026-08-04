@@ -1,0 +1,11 @@
+.env
+.position
+err.log
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+.env.*
+!.env.example
