@@ -1,6 +1,6 @@
 {
   "billing_period_end_days": [14, "last"],
-  "timezone": "America/New_York",
+  "timezone": "America/Los_Angeles",
 
   "target_hours": 54,
   "hourly_rate": 0,

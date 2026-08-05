@@ -7,9 +7,13 @@ import threading
 import tkinter as tk
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
-from notion_client import NotionError, fetch_total_hours_safe
+from notion_client import (
+    NotionError,
+    active_elapsed_hours,
+    fetch_active_timer_start_safe,
+    fetch_total_hours_safe,
+    get_local_timezone,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.json"
@@ -109,6 +113,33 @@ def hours_to_meet_day_goal(worked, today_hours, target, days_left, days_off=0):
     return max(daily_goal - logged_today, 0.0)
 
 
+def available_days_off(days_left):
+    """Days-off tiers that fit in the remaining period (0 = base min goal)."""
+    return [0] + [n for n in (1, 2, 3) if n <= days_left]
+
+
+def current_goal_days_off(worked, today_hours, target, days_left):
+    """Lowest unmet days-off tier; bumps up after today's min for that tier is hit."""
+    remaining = hours_remaining(worked, target)
+    if remaining is None or remaining <= 0:
+        return None
+    tiers = available_days_off(days_left)
+    for off in tiers:
+        to_meet = hours_to_meet_day_goal(
+            worked, today_hours, target, days_left, days_off=off
+        )
+        if to_meet is not None and to_meet > 0:
+            return off
+    return tiers[-1]
+
+
+def goal_tier_label(days_off):
+    if not days_off:
+        return "min goal"
+    label = "day" if days_off == 1 else "days"
+    return f"off {days_off} {label} goal"
+
+
 def format_clock(dt):
     """Format a datetime as 6:06PM (no leading zero on the hour)."""
     hour12 = dt.hour % 12 or 12
@@ -116,19 +147,24 @@ def format_clock(dt):
     return f"{hour12}:{dt.minute:02d}{ampm}"
 
 
-def finish_by_label(now, hours_needed):
-    """Clock time if work continues from now for hours_needed, e.g. (6:06PM)."""
+def finish_by_datetime(now, hours_needed):
     if now is None or hours_needed is None:
-        return ""
-    # Use rounded minutes so the clock matches the H:MM duration shown beside it
+        return None
     minutes = int(round(float(hours_needed) * 60))
     if minutes <= 0:
-        return f"({format_clock(now)})"
-    finish = now + timedelta(minutes=minutes)
+        return now
+    return now + timedelta(minutes=minutes)
+
+
+def finish_by_label(now, hours_needed):
+    """Clock time if work continues from now for hours_needed, e.g. (6:06PM)."""
+    finish = finish_by_datetime(now, hours_needed)
+    if finish is None:
+        return ""
     return f"({format_clock(finish)})"
 
 
-def format_status_line(days_left, worked, target):
+def format_status_line(days_left, worked, target, today_hours=0.0, now=None):
     days_part = format_days_left(days_left)
     if worked is None:
         return f"{days_part} | …"
@@ -137,25 +173,67 @@ def format_status_line(days_left, worked, target):
         return f"{days_part} | {format_hm(worked)}"
     if remaining <= 0:
         return f"{days_part} | done"
-    per_day = hours_per_day(remaining, days_left, days_off=0)
-    return f"{days_part} | {format_hm(per_day)}/day"
+
+    off = current_goal_days_off(worked, today_hours, target, days_left)
+    if off is None:
+        return f"{days_part} | done"
+    per_day = hours_per_day(remaining, days_left, days_off=off)
+    to_meet = hours_to_meet_day_goal(
+        worked, today_hours, target, days_left, days_off=off
+    )
+    finish = finish_by_datetime(now, to_meet)
+    if to_meet is not None and to_meet <= 0:
+        return f"{days_part} | {format_hm(per_day)}/day | met"
+    if finish is None:
+        return f"{days_part} | {format_hm(per_day)}/day"
+    return f"{days_part} | {format_hm(per_day)}/day | {format_clock(finish)}"
 
 
-def format_pace_tooltip(worked, target, days_left, today_hours=0.0, now=None):
+def format_active_timer_note(active_elapsed):
+    if not active_elapsed or active_elapsed <= 0:
+        return ""
+    return f" (−{format_hm(active_elapsed)} active timer)"
+
+
+def effective_today_hours(stopped_today, active_start, now=None):
+    """Stopped hours today plus live elapsed on the active Running timer."""
+    active = active_elapsed_hours(active_start, now=now)
+    return float(stopped_today or 0) + active, active
+
+
+def format_pace_tooltip(
+    worked,
+    target,
+    days_left,
+    today_hours=0.0,
+    now=None,
+    active_elapsed=0.0,
+):
     remaining = hours_remaining(worked, target)
     if remaining is None:
         return f"{format_hm(worked)} logged (no target set)"
     if remaining <= 0:
         return f"target hit (+{format_hm(-remaining)})"
-    to_min = hours_to_meet_day_goal(worked, today_hours, target, days_left)
+    active_note = format_active_timer_note(active_elapsed)
+    current_off = current_goal_days_off(worked, today_hours, target, days_left)
+    if current_off is None:
+        return f"target hit (+{format_hm(-remaining)})"
+
+    to_current = hours_to_meet_day_goal(
+        worked, today_hours, target, days_left, days_off=current_off
+    )
     lines = [
         f"{format_hm(remaining)} left to {format_hm(target)}",
         (
-            f"{format_hm(to_min)} to meet min goal {finish_by_label(now, to_min)} "
-            f"| {format_hm(today_hours or 0)} worked today"
+            f"{format_hm(to_current)} to meet {goal_tier_label(current_off)} "
+            f"{finish_by_label(now, to_current)}"
+            f"{active_note} | {format_hm(today_hours or 0)} worked today"
         ),
     ]
+    # Higher days-off tiers only (current min already shown above)
     for off in (1, 2, 3):
+        if off > days_left or off <= current_off:
+            continue
         per_day = hours_per_day(remaining, days_left, days_off=off)
         to_meet = hours_to_meet_day_goal(
             worked, today_hours, target, days_left, days_off=off
@@ -163,7 +241,7 @@ def format_pace_tooltip(worked, target, days_left, today_hours=0.0, now=None):
         label = "day" if off == 1 else "days"
         lines.append(
             f"off {off} {label}: {format_hm(per_day)}/day | "
-            f"{format_hm(to_meet)} to meet {finish_by_label(now, to_meet)}"
+            f"{format_hm(to_meet)} to meet {finish_by_label(now, to_meet)}{active_note}"
         )
     return "\n".join(lines)
 
@@ -296,7 +374,10 @@ class HoverTip:
 class Widget:
     def __init__(self, config):
         self.config = config
-        self.tz = ZoneInfo(config.get("timezone", "UTC"))
+        # Prefer OS timezone (e.g. Pacific Standard Time → America/Los_Angeles)
+        self.tz = get_local_timezone(
+            fallback=config.get("timezone") or "America/Los_Angeles"
+        )
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
@@ -331,7 +412,8 @@ class Widget:
 
         self._drag_offset = (0, 0)
         self._worked_hours = None
-        self._today_hours = 0.0
+        self._today_stopped_hours = 0.0
+        self._active_timer_start = None
         self._hours_error = None
         self._notion_lock = threading.Lock()
 
@@ -339,6 +421,7 @@ class Widget:
         self.update_text()
         self.refresh_hours_async()
         self.schedule_periodic_hours_refresh()
+        self.schedule_active_timer_tick()
 
     def position_window(self):
         self.root.update_idletasks()
@@ -388,7 +471,9 @@ class Widget:
     def reload(self):
         try:
             self.config = load_config()
-            self.tz = ZoneInfo(self.config.get("timezone", "UTC"))
+            self.tz = get_local_timezone(
+                fallback=self.config.get("timezone") or "America/Los_Angeles"
+            )
             self.root.attributes("-alpha", float(self.config.get("opacity", 0.85)))
             bg = self.config.get("bg_color", "#1e1e1e")
             fg = self.config.get("fg_color", "#e6e6e6")
@@ -420,8 +505,22 @@ class Widget:
                 )
                 self.hours_tip.set_text("")
             else:
+                today_hours = 0.0
+                active_elapsed = 0.0
+                if self._worked_hours is not None:
+                    today_hours, active_elapsed = effective_today_hours(
+                        self._today_stopped_hours,
+                        self._active_timer_start,
+                        now=now,
+                    )
                 self.hours_label.configure(
-                    text=format_status_line(days, self._worked_hours, target)
+                    text=format_status_line(
+                        days,
+                        self._worked_hours,
+                        target,
+                        today_hours=today_hours,
+                        now=now,
+                    )
                 )
                 if self._worked_hours is not None:
                     self.hours_tip.set_text(
@@ -429,8 +528,9 @@ class Widget:
                             self._worked_hours,
                             target,
                             days,
-                            today_hours=self._today_hours,
+                            today_hours=today_hours,
                             now=now,
+                            active_elapsed=active_elapsed,
                         )
                     )
                 else:
@@ -466,6 +566,14 @@ class Widget:
         self.refresh_hours_async()
         self.schedule_periodic_hours_refresh()
 
+    def schedule_active_timer_tick(self):
+        # Recompute live Start→now elapsed / finish-by times without a Notion round-trip
+        self.root.after(60_000, self._active_timer_tick)
+
+    def _active_timer_tick(self):
+        self.render()
+        self.schedule_active_timer_tick()
+
     def _hours_query_range(self, today):
         start, period_end = current_billing_period(today, self.config["billing_period_end_days"])
         end = period_end
@@ -500,23 +608,35 @@ class Widget:
                     total, _rows = fetch_total_hours_safe(
                         database_id, hours_property, date_property, start, end, **fetch_kwargs
                     )
-                    today_total = 0.0
+                    today_stopped = 0.0
+                    active_start = None
                     if bool(self.config.get("notion_exclude_today", True)):
-                        today_total, _today_rows = fetch_total_hours_safe(
+                        # Stopped-only today; active Running time is applied live from Start
+                        today_stopped, _today_rows = fetch_total_hours_safe(
                             database_id,
                             hours_property,
                             date_property,
                             today,
                             today,
+                            include_running=False,
                             **fetch_kwargs,
                         )
-                    worked, today_hours, err = total, today_total, None
+                        active_start = fetch_active_timer_start_safe(
+                            database_id,
+                            date_property,
+                            agent_property=fetch_kwargs.get("agent_property"),
+                            agent_user_id=fetch_kwargs.get("agent_user_id"),
+                            exclude_client_names=fetch_kwargs.get("exclude_client_names"),
+                            exclude_client_ids=fetch_kwargs.get("exclude_client_ids"),
+                        )
+                    worked, err = total, None
                 except NotionError as e:
-                    worked, today_hours, err = None, 0.0, str(e)
+                    worked, today_stopped, active_start, err = None, 0.0, None, str(e)
 
                 def apply():
                     self._worked_hours = worked
-                    self._today_hours = today_hours
+                    self._today_stopped_hours = today_stopped
+                    self._active_timer_start = active_start
                     self._hours_error = err
                     self.render()
                 self.root.after(0, apply)

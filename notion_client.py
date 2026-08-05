@@ -8,6 +8,7 @@ If the formula is empty, duration is derived from Start/End (or Start→now for 
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -20,9 +21,66 @@ CONFIG_PATH = SCRIPT_DIR / "config.json"
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
+# Windows TimeZoneKeyName / tzname → IANA (keeps PST/PDT transitions correct)
+_WINDOWS_TZ_TO_IANA = {
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Mountain Standard Time": "America/Denver",
+    "US Mountain Standard Time": "America/Phoenix",
+    "Central Standard Time": "America/Chicago",
+    "Eastern Standard Time": "America/New_York",
+    "Alaskan Standard Time": "America/Anchorage",
+    "Hawaiian Standard Time": "Pacific/Honolulu",
+    "UTC": "UTC",
+    "Greenwich Standard Time": "UTC",
+}
+
 
 class NotionError(Exception):
     pass
+
+
+def _windows_timezone_key():
+    """Read the active Windows time zone key, or None off Windows / on failure."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+        ) as key:
+            name, _ = winreg.QueryValueEx(key, "TimeZoneKeyName")
+            return (name or "").strip() or None
+    except OSError as e:
+        print(f"warn: could not read Windows timezone key: {e}", file=sys.stderr)
+        return None
+
+
+def get_local_timezone(fallback="America/Los_Angeles"):
+    """Resolve the host timezone dynamically (IANA ZoneInfo when possible)."""
+    win_key = _windows_timezone_key()
+    if win_key and win_key in _WINDOWS_TZ_TO_IANA:
+        return ZoneInfo(_WINDOWS_TZ_TO_IANA[win_key])
+
+    # time.tzname[0] is often the Windows standard name on this platform
+    if time.tzname:
+        std_name = time.tzname[0]
+        if std_name in _WINDOWS_TZ_TO_IANA:
+            return ZoneInfo(_WINDOWS_TZ_TO_IANA[std_name])
+
+    local = datetime.now().astimezone().tzinfo
+    if getattr(local, "key", None):
+        return local
+    if local is not None and not win_key:
+        # Non-Windows: prefer ZoneInfo from key if present; else keep system tzinfo
+        return local
+
+    try:
+        return ZoneInfo(fallback)
+    except Exception as e:
+        print(f"warn: invalid fallback timezone {fallback!r}: {e}", file=sys.stderr)
+        return timezone.utc
 
 
 def load_env():
@@ -185,6 +243,22 @@ def _row_local_date(props, date_property, local_tz):
     return start_dt.astimezone(local_tz).date()
 
 
+def _status_name(props):
+    status = props.get("Status") or {}
+    if status.get("type") != "select":
+        return ""
+    select = status.get("select") or {}
+    return select.get("name") or ""
+
+
+def active_elapsed_hours(active_start, now=None):
+    """Hours elapsed on a running timer from Start until now."""
+    if active_start is None:
+        return 0.0
+    end = now or datetime.now(timezone.utc)
+    return _hours_from_start_end(active_start, end)
+
+
 def fetch_total_hours(
     database_id,
     hours_property,
@@ -198,6 +272,7 @@ def fetch_total_hours(
     exclude_client_names=None,
     exclude_client_ids=None,
     local_tz=None,
+    include_running=True,
 ):
     """Sum hours for rows whose local start date falls in [start, end]."""
     if end < start:
@@ -227,6 +302,8 @@ def fetch_total_hours(
                 exclude_ids=exclude_client_ids,
             ):
                 continue
+            if not include_running and _status_name(props) == "Running":
+                continue
             total += _row_hours(
                 props,
                 hours_property,
@@ -238,6 +315,48 @@ def fetch_total_hours(
             break
         body["start_cursor"] = data["next_cursor"]
     return total, rows
+
+
+def fetch_active_timer_start(
+    database_id,
+    date_property,
+    token,
+    agent_property=None,
+    agent_user_id=None,
+    exclude_client_names=None,
+    exclude_client_ids=None,
+):
+    """Return Start datetime of the newest Running timer (or None)."""
+    clauses = [{"property": "Status", "select": {"equals": "Running"}}]
+    if agent_property and agent_user_id:
+        clauses.append({
+            "property": agent_property,
+            "people": {"contains": agent_user_id},
+        })
+    body = {
+        "filter": {"and": clauses} if len(clauses) > 1 else clauses[0],
+        "page_size": 100,
+    }
+    best_start = None
+    while True:
+        data = _request("POST", f"databases/{database_id}/query", token, body)
+        for page in data.get("results", []):
+            props = page.get("properties", {}) or {}
+            if row_matches_excluded_client(
+                props,
+                exclude_names=exclude_client_names,
+                exclude_ids=exclude_client_ids,
+            ):
+                continue
+            start_dt = _extract_date_start(props.get(date_property))
+            if start_dt is None:
+                continue
+            if best_start is None or start_dt > best_start:
+                best_start = start_dt
+        if not data.get("has_more"):
+            break
+        body["start_cursor"] = data["next_cursor"]
+    return best_start
 
 
 def get_database_schema(database_id, token):
@@ -260,6 +379,31 @@ def _friendly_http_error(code, message, database_id):
     return f"HTTP {code}: {message}"
 
 
+def _with_notion_errors(database_id, fn):
+    try:
+        return fn()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            msg = json.loads(body).get("message", body)
+        except Exception as parse_err:
+            print(f"error: failed to parse Notion error body: {parse_err}", file=sys.stderr)
+            msg = body
+        raise NotionError(_friendly_http_error(e.code, msg, database_id)) from e
+    except urllib.error.URLError as e:
+        raise NotionError(f"network error: {e.reason}") from e
+
+
+def _require_token_and_db(database_id):
+    env = load_env()
+    token = env.get("NOTION_SECRET")
+    if not token:
+        raise NotionError("NOTION_SECRET not set in .env")
+    if not database_id:
+        raise NotionError("notion_database_id not set in config.json")
+    return token
+
+
 def fetch_total_hours_safe(
     database_id,
     hours_property,
@@ -272,16 +416,13 @@ def fetch_total_hours_safe(
     exclude_client_names=None,
     exclude_client_ids=None,
     local_tz=None,
+    include_running=True,
 ):
     """Wrapper that loads the token, calls the API, and converts errors to NotionError."""
-    env = load_env()
-    token = env.get("NOTION_SECRET")
-    if not token:
-        raise NotionError("NOTION_SECRET not set in .env")
-    if not database_id:
-        raise NotionError("notion_database_id not set in config.json")
-    try:
-        return fetch_total_hours(
+    token = _require_token_and_db(database_id)
+    return _with_notion_errors(
+        database_id,
+        lambda: fetch_total_hours(
             database_id,
             hours_property,
             date_property,
@@ -294,17 +435,33 @@ def fetch_total_hours_safe(
             exclude_client_names=exclude_client_names,
             exclude_client_ids=exclude_client_ids,
             local_tz=local_tz,
-        )
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")
-        try:
-            msg = json.loads(body).get("message", body)
-        except Exception as parse_err:
-            print(f"error: failed to parse Notion error body: {parse_err}", file=sys.stderr)
-            msg = body
-        raise NotionError(_friendly_http_error(e.code, msg, database_id)) from e
-    except urllib.error.URLError as e:
-        raise NotionError(f"network error: {e.reason}") from e
+            include_running=include_running,
+        ),
+    )
+
+
+def fetch_active_timer_start_safe(
+    database_id,
+    date_property,
+    agent_property=None,
+    agent_user_id=None,
+    exclude_client_names=None,
+    exclude_client_ids=None,
+):
+    """Safe wrapper for fetch_active_timer_start."""
+    token = _require_token_and_db(database_id)
+    return _with_notion_errors(
+        database_id,
+        lambda: fetch_active_timer_start(
+            database_id,
+            date_property,
+            token,
+            agent_property=agent_property,
+            agent_user_id=agent_user_id,
+            exclude_client_names=exclude_client_names,
+            exclude_client_ids=exclude_client_ids,
+        ),
+    )
 
 
 def _load_config():
@@ -332,7 +489,7 @@ def main(argv=None):
         parser.error("Specify --dry-run and/or --test")
 
     config = _load_config()
-    local_tz = ZoneInfo(config.get("timezone", "UTC"))
+    local_tz = get_local_timezone(fallback=config.get("timezone") or "America/Los_Angeles")
     if args.start and args.end:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end)

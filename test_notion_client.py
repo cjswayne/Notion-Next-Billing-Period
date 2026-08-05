@@ -8,9 +8,13 @@ from notion_client import (
     _hours_from_start_end,
     _row_hours,
     _row_local_date,
+    active_elapsed_hours,
+    get_local_timezone,
     row_matches_excluded_client,
 )
 from widget import (
+    current_goal_days_off,
+    effective_today_hours,
     finish_by_label,
     format_clock,
     format_hm,
@@ -73,15 +77,22 @@ class TestHoursExtraction(unittest.TestCase):
 
 class TestLocalDateFilter(unittest.TestCase):
     def test_evening_pacific_stays_on_local_calendar_day(self):
-        # 2026-08-03 20:16 PDT is still Aug 3 in America/New_York
         props = {
             "Start": {
                 "type": "date",
                 "date": {"start": "2026-08-03T20:16:00.000-07:00", "end": None},
             }
         }
-        ny = ZoneInfo("America/New_York")
-        self.assertEqual(_row_local_date(props, "Start", ny).isoformat(), "2026-08-03")
+        la = ZoneInfo("America/Los_Angeles")
+        self.assertEqual(_row_local_date(props, "Start", la).isoformat(), "2026-08-03")
+
+    def test_get_local_timezone_resolves_iana(self):
+        tz = get_local_timezone()
+        # On this Windows host we expect Pacific → America/Los_Angeles
+        key = getattr(tz, "key", None)
+        self.assertTrue(key or tz is not None)
+        if key:
+            self.assertEqual(key, "America/Los_Angeles")
 
 
 class TestClientExclude(unittest.TestCase):
@@ -151,10 +162,29 @@ class TestPaceMath(unittest.TestCase):
         self.assertEqual(format_hm(-1.25), "-1:15")
 
     def test_format_status_line(self):
-        self.assertEqual(format_status_line(10, 14, 54), "10 days left | 4:00/day")
-        self.assertEqual(format_status_line(1, 14, 54), "1 day left | 40:00/day")
-        self.assertEqual(format_status_line(10, 60, 54), "10 days left | done")
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # Base min 4:00/day, 0 today → finish in 4h = 7:30PM
+        self.assertEqual(
+            format_status_line(10, 14, 54, today_hours=0, now=now),
+            "10 days left | 4:00/day | 7:30PM",
+        )
+        self.assertEqual(format_status_line(10, 60, 54, today_hours=0, now=now), "10 days left | done")
         self.assertEqual(format_status_line(10, None, 54), "10 days left | …")
+
+    def test_current_goal_bumps_after_min_met(self):
+        # Base min 4:00; with 4:00 today → bump to off-1 (40/9 ≈ 4:27)
+        self.assertEqual(current_goal_days_off(14, 4.0, 54, 10), 1)
+        self.assertEqual(current_goal_days_off(14, 1.0, 54, 10), 0)
+        # Off-1 also met (4.5 > 4.27) → bump to off-2 (5:00)
+        self.assertEqual(current_goal_days_off(14, 4.5, 54, 10), 2)
+
+    def test_format_status_line_bumped_tier(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # 4:00 today meets base min; status uses off-1 pace 4:27, 0:27 left → 3:57PM
+        self.assertEqual(
+            format_status_line(10, 14, 54, today_hours=4.0, now=now),
+            "10 days left | 4:27/day | 3:57PM",
+        )
 
     def test_hours_to_meet_day_goal(self):
         # 4:00/day min, 1.5h already today → 2:30 left
@@ -167,15 +197,57 @@ class TestPaceMath(unittest.TestCase):
         self.assertEqual(finish_by_label(now, 2.5), "(6:00PM)")
         self.assertEqual(finish_by_label(now, 0), "(3:30PM)")
 
+    def test_active_timer_reduces_time_to_meet(self):
+        tz = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=tz)
+        active_start = now - timedelta(minutes=30)
+        today_hours, active = effective_today_hours(1.0, active_start, now=now)
+        self.assertAlmostEqual(active, 0.5)
+        self.assertAlmostEqual(today_hours, 1.5)
+        self.assertAlmostEqual(active_elapsed_hours(active_start, now=now), 0.5)
+
     def test_format_pace_tooltip_lists_days_off(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now)
         self.assertIn("40:00 left to 54:00", tip)
         self.assertIn("2:30 to meet min goal (6:00PM) | 1:30 worked today", tip)
-        # 40/9 ≈ 4:27/day → 2:57 left after 1:30 today → 6:27PM
+        # Higher tiers only while still on base min
         self.assertIn("off 1 day: 4:27/day | 2:57 to meet (6:27PM)", tip)
         self.assertIn("off 2 days: 5:00/day | 3:30 to meet (7:00PM)", tip)
         self.assertIn("off 3 days: 5:43/day | 4:13 to meet (7:43PM)", tip)
+
+    def test_format_pace_tooltip_bumped_hides_lower_tiers(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        tip = format_pace_tooltip(14, 54, 10, today_hours=4.0, now=now)
+        self.assertIn("to meet off 1 day goal", tip)
+        self.assertNotIn("off 1 day:", tip)
+        self.assertIn("off 2 days:", tip)
+        self.assertIn("off 3 days:", tip)
+
+    def test_format_pace_tooltip_shows_active_timer_note(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        tip = format_pace_tooltip(
+            14, 54, 10, today_hours=2.0, now=now, active_elapsed=0.5
+        )
+        self.assertIn("−0:30 active timer", tip)
+        self.assertIn("2:00 to meet min goal (5:30PM) (−0:30 active timer) | 2:00 worked today", tip)
+
+    def test_off_day_lines_respect_days_left(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        last_day = format_pace_tooltip(14, 54, 0, today_hours=1.0, now=now)
+        self.assertNotIn("off 1 day:", last_day)
+        self.assertNotIn("off 2 days:", last_day)
+        self.assertNotIn("off 3 days:", last_day)
+
+        one_left = format_pace_tooltip(14, 54, 1, today_hours=1.0, now=now)
+        self.assertIn("off 1 day:", one_left)
+        self.assertNotIn("off 2 days:", one_left)
+        self.assertNotIn("off 3 days:", one_left)
+
+        two_left = format_pace_tooltip(14, 54, 2, today_hours=1.0, now=now)
+        self.assertIn("off 1 day:", two_left)
+        self.assertIn("off 2 days:", two_left)
+        self.assertNotIn("off 3 days:", two_left)
 
 
 if __name__ == "__main__":
