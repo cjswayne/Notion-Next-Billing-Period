@@ -84,6 +84,16 @@ def format_hm(hours):
     return f"{sign}{h}:{m:02d}"
 
 
+def format_hm_prose(hours):
+    """Format decimal hours as 'H hours & M minutes' for the status line only."""
+    if hours is None:
+        return None
+    sign = "-" if hours < 0 else ""
+    total_minutes = int(round(abs(float(hours)) * 60))
+    h, m = divmod(total_minutes, 60)
+    return f"{sign}{h} hours & {m} minutes"
+
+
 def hours_remaining(worked, target):
     if target is None:
         return None
@@ -170,7 +180,7 @@ def format_status_line(days_left, worked, target, today_hours=0.0, now=None):
         return f"{days_part} | …"
     remaining = hours_remaining(worked, target)
     if remaining is None:
-        return f"{days_part} | {format_hm(worked)}"
+        return f"{days_part} | {format_hm_prose(worked)}"
     if remaining <= 0:
         return f"{days_part} | done"
 
@@ -183,10 +193,10 @@ def format_status_line(days_left, worked, target, today_hours=0.0, now=None):
     )
     finish = finish_by_datetime(now, to_meet)
     if to_meet is not None and to_meet <= 0:
-        return f"{days_part} | {format_hm(per_day)}/day | met"
+        return f"{days_part} | {format_hm_prose(per_day)} per day | met"
     if finish is None:
-        return f"{days_part} | {format_hm(per_day)}/day"
-    return f"{days_part} | {format_hm(per_day)}/day | {format_clock(finish)}"
+        return f"{days_part} | {format_hm_prose(per_day)} per day"
+    return f"{days_part} | {format_hm_prose(per_day)} per day | {format_clock(finish)}"
 
 
 def format_active_timer_note(active_elapsed):

@@ -18,6 +18,7 @@ from widget import (
     finish_by_label,
     format_clock,
     format_hm,
+    format_hm_prose,
     format_pace_tooltip,
     format_status_line,
     hours_per_day,
@@ -161,12 +162,18 @@ class TestPaceMath(unittest.TestCase):
         self.assertEqual(format_hm(0.25), "0:15")
         self.assertEqual(format_hm(-1.25), "-1:15")
 
+    def test_format_hm_prose(self):
+        self.assertEqual(format_hm_prose(4), "4 hours & 0 minutes")
+        self.assertEqual(format_hm_prose(4.5), "4 hours & 30 minutes")
+        self.assertEqual(format_hm_prose(0.25), "0 hours & 15 minutes")
+        self.assertEqual(format_hm_prose(-1.25), "-1 hours & 15 minutes")
+
     def test_format_status_line(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
-        # Base min 4:00/day, 0 today → finish in 4h = 7:30PM
+        # Base min 4h/day, 0 today → finish in 4h = 7:30PM
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=0, now=now),
-            "10 days left | 4:00/day | 7:30PM",
+            "10 days left | 4 hours & 0 minutes per day | 7:30PM",
         )
         self.assertEqual(format_status_line(10, 60, 54, today_hours=0, now=now), "10 days left | done")
         self.assertEqual(format_status_line(10, None, 54), "10 days left | …")
@@ -180,10 +187,10 @@ class TestPaceMath(unittest.TestCase):
 
     def test_format_status_line_bumped_tier(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
-        # 4:00 today meets base min; status uses off-1 pace 4:27, 0:27 left → 3:57PM
+        # 4h today meets base min; status uses off-1 pace ~4:27, ~0:27 left → 3:57PM
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=4.0, now=now),
-            "10 days left | 4:27/day | 3:57PM",
+            "10 days left | 4 hours & 27 minutes per day | 3:57PM",
         )
 
     def test_hours_to_meet_day_goal(self):
