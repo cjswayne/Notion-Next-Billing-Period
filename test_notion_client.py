@@ -11,6 +11,7 @@ from notion_client import (
     active_elapsed_hours,
     get_local_timezone,
     row_matches_excluded_client,
+    row_matches_included_client,
 )
 from widget import (
     current_goal_days_off,
@@ -18,12 +19,17 @@ from widget import (
     finish_by_label,
     format_clock,
     format_hm,
+    format_hm_per_day,
     format_hm_prose,
     format_pace_tooltip,
     format_status_line,
+    format_target_hours,
+    halfway_by_label,
+    halfway_clock_label,
     hours_per_day,
     hours_remaining,
     hours_to_meet_day_goal,
+    widget_days_off,
 )
 
 
@@ -146,6 +152,30 @@ class TestClientExclude(unittest.TestCase):
         )
 
 
+class TestClientInclude(unittest.TestCase):
+    def test_include_by_client_prop_name(self):
+        props = {
+            "Task Client Prop": {
+                "type": "formula",
+                "formula": {"type": "string", "string": "@JadePuma Apps"},
+            }
+        }
+        self.assertTrue(
+            row_matches_included_client(props, include_names=["JadePuma Apps"])
+        )
+
+    def test_exclude_other_clients_from_include(self):
+        props = {
+            "Task Client Prop": {
+                "type": "formula",
+                "formula": {"type": "string", "string": "@The Open Road Printshop"},
+            }
+        }
+        self.assertFalse(
+            row_matches_included_client(props, include_names=["JadePuma Apps"])
+        )
+
+
 class TestPaceMath(unittest.TestCase):
     def test_hours_needed_per_day(self):
         # 54 target, 14 worked, 10 days left → 4.0 h/day
@@ -157,41 +187,81 @@ class TestPaceMath(unittest.TestCase):
         self.assertAlmostEqual(hours_per_day(remaining, 10, days_off=3), 40 / 7)
 
     def test_format_hm(self):
-        self.assertEqual(format_hm(4), "4:00")
-        self.assertEqual(format_hm(4.5), "4:30")
-        self.assertEqual(format_hm(0.25), "0:15")
-        self.assertEqual(format_hm(-1.25), "-1:15")
+        self.assertEqual(format_hm(4), "4hrs & 0min")
+        self.assertEqual(format_hm(4.5), "4hrs & 30min")
+        self.assertEqual(format_hm(0.25), "0hrs & 15min")
+        self.assertEqual(format_hm(-1.25), "-1hrs & 15min")
 
     def test_format_hm_prose(self):
-        self.assertEqual(format_hm_prose(4), "4 hours & 0 minutes")
-        self.assertEqual(format_hm_prose(4.5), "4 hours & 30 minutes")
-        self.assertEqual(format_hm_prose(0.25), "0 hours & 15 minutes")
-        self.assertEqual(format_hm_prose(-1.25), "-1 hours & 15 minutes")
+        self.assertEqual(format_hm_prose(4), "4hrs & 0min")
+        self.assertEqual(format_hm_prose(4.5), "4hrs & 30min")
+
+    def test_format_hm_per_day(self):
+        self.assertEqual(format_hm_per_day(4.5), "4hrs & 30min / day")
+
+    def test_format_target_hours(self):
+        self.assertEqual(format_target_hours(60), "60hrs")
+        self.assertEqual(format_target_hours(60.4), "60hrs")
+        self.assertEqual(format_target_hours(20), "20hrs")
 
     def test_format_status_line(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
-        # Base min 4h/day, 0 today → finish in 4h = 7:30PM
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=0, now=now),
-            "10 days left | 4 hours & 0 minutes per day | 7:30PM",
+            "10 days left | client 4hrs & 27min / day | 4hrs & 27min left today | "
+            "halfway 5:43PM | done 7:57PM",
         )
         self.assertEqual(format_status_line(10, 60, 54, today_hours=0, now=now), "10 days left | done")
         self.assertEqual(format_status_line(10, None, 54), "10 days left | …")
 
-    def test_current_goal_bumps_after_min_met(self):
-        # Base min 4:00; with 4:00 today → bump to off-1 (40/9 ≈ 4:27)
-        self.assertEqual(current_goal_days_off(14, 4.0, 54, 10), 1)
-        self.assertEqual(current_goal_days_off(14, 1.0, 54, 10), 0)
-        # Off-1 also met (4.5 > 4.27) → bump to off-2 (5:00)
-        self.assertEqual(current_goal_days_off(14, 4.5, 54, 10), 2)
-
-    def test_format_status_line_bumped_tier(self):
+    def test_format_status_line_shows_app_pace_and_combined_finish(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
-        # 4h today meets base min; status uses off-1 pace ~4:27, ~0:27 left → 3:57PM
+        line = format_status_line(
+            10, 14, 54, today_hours=0, now=now, app_worked=5, app_target=20
+        )
+        self.assertIn("client 4hrs & 27min / day", line)
+        self.assertIn("app 1hrs & 40min / day", line)
+        self.assertIn("6hrs & 7min left today", line)
+        # Finish stays combined (client+app), but halfway is client-only
+        self.assertIn("done 9:37PM", line)
+        self.assertIn("halfway 5:43PM", line)
+
+    def test_format_status_line_client_done_app_not(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        line = format_status_line(
+            10, 60, 54, today_hours=0, now=now, app_worked=5, app_target=20
+        )
+        self.assertIn("client done", line)
+        self.assertIn("app 1hrs & 40min / day", line)
+        self.assertIn("1hrs & 40min left today", line)
+        self.assertIn("done 5:10PM", line)
+        # Halfway is a client-only concept; no client goal left means no halfway
+        self.assertNotIn("halfway", line)
+
+    def test_format_status_line_both_done(self):
+        line = format_status_line(10, 60, 54, app_worked=25, app_target=20)
+        self.assertEqual(line, "10 days left | done")
+
+    def test_widget_days_off(self):
+        self.assertEqual(widget_days_off(10), 1)
+        self.assertEqual(widget_days_off(1), 1)
+        self.assertEqual(widget_days_off(0), 0)
+
+    def test_format_status_line_off_one_with_progress(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # 4h already logged today exceeds half of the ~4:27 daily goal (~2:13),
+        # so the halfway point has already passed and should not be shown.
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=4.0, now=now),
-            "10 days left | 4 hours & 27 minutes per day | 3:57PM",
+            "10 days left | client 4hrs & 27min / day | 0hrs & 27min left today | done 3:57PM",
         )
+
+    def test_halfway_clock_label_accounts_for_hours_already_worked(self):
+        now = datetime(2026, 8, 4, 12, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # 6:12 full daily goal, 2:15 already worked → half (3:06) is 51min away
+        self.assertEqual(halfway_clock_label(now, 6.2, 2.25), "12:51PM")
+        # Already worked past the halfway mark → no halfway shown
+        self.assertEqual(halfway_clock_label(now, 6.2, 4.0), "")
 
     def test_hours_to_meet_day_goal(self):
         # 4:00/day min, 1.5h already today → 2:30 left
@@ -203,6 +273,7 @@ class TestPaceMath(unittest.TestCase):
         self.assertEqual(format_clock(now), "3:30PM")
         self.assertEqual(finish_by_label(now, 2.5), "(6:00PM)")
         self.assertEqual(finish_by_label(now, 0), "(3:30PM)")
+        self.assertEqual(halfway_by_label(now, 2.5), "4:45PM")
 
     def test_active_timer_reduces_time_to_meet(self):
         tz = ZoneInfo("America/Los_Angeles")
@@ -213,48 +284,82 @@ class TestPaceMath(unittest.TestCase):
         self.assertAlmostEqual(today_hours, 1.5)
         self.assertAlmostEqual(active_elapsed_hours(active_start, now=now), 0.5)
 
+    def test_current_goal_days_off(self):
+        self.assertEqual(current_goal_days_off(14, 4.0, 54, 10), 1)
+        self.assertEqual(current_goal_days_off(14, 1.0, 54, 10), 0)
+        self.assertEqual(current_goal_days_off(14, 4.5, 54, 10), 2)
+
     def test_format_pace_tooltip_lists_days_off(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now)
-        self.assertIn("40:00 left to 54:00", tip)
-        self.assertIn("2:30 to meet min goal (6:00PM) | 1:30 worked today", tip)
-        # Higher tiers only while still on base min
-        self.assertIn("off 1 day: 4:27/day | 2:57 to meet (6:27PM)", tip)
-        self.assertIn("off 2 days: 5:00/day | 3:30 to meet (7:00PM)", tip)
-        self.assertIn("off 3 days: 5:43/day | 4:13 to meet (7:43PM)", tip)
+        self.assertIn("Client: 40hrs & 0min left of 54hrs (4hrs & 27min / day)", tip)
+        self.assertIn("Today: 1hrs & 30min worked", tip)
+        # Halfway accounts for the 1:30 already logged today, not half of the remaining 2:57
+        self.assertIn("Need: 2hrs & 57min more \u2192 done 6:27PM (halfway 4:13PM)", tip)
+        self.assertNotIn("Off 1 day:", tip)
+        self.assertIn("Off 2 days: client 5hrs & 0min / day \u2192 done 7:00PM", tip)
+        self.assertIn("Off 3 days: client 5hrs & 43min / day \u2192 done 7:43PM", tip)
 
-    def test_format_pace_tooltip_bumped_hides_lower_tiers(self):
+    def test_format_pace_tooltip_client_done_app_not(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        tip = format_pace_tooltip(
+            60, 54, 10, today_hours=0, now=now, app_worked=5, app_target=20
+        )
+        self.assertIn("Client: done (+6hrs & 0min)", tip)
+        self.assertIn("App: 15hrs & 0min left of 20hrs (1hrs & 40min / day)", tip)
+        self.assertIn("Need: 1hrs & 40min more \u2192 done 5:10PM", tip)
+        # Halfway is a client-only concept; client target already hit
+        self.assertNotIn("halfway", tip)
+        self.assertNotIn("Off 2 days", tip)
+        self.assertNotIn("Off 3 days", tip)
+
+    def test_format_pace_tooltip_shows_client_and_app_remaining(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
+        tip = format_pace_tooltip(
+            14, 54, 10, today_hours=1.5, now=now, app_worked=5, app_target=20
+        )
+        self.assertIn("Client: 40hrs & 0min left of 54hrs (4hrs & 27min / day)", tip)
+        self.assertIn("App: 15hrs & 0min left of 20hrs (1hrs & 40min / day)", tip)
+        self.assertIn("Today: 1hrs & 30min worked | 0hrs & 0min app", tip)
+        # Need/finish are combined (client+app), but halfway is client-only
+        self.assertIn("Need: 4hrs & 37min more \u2192 done 8:07PM (halfway 4:13PM)", tip)
+
+    def test_format_pace_tooltip_still_shows_need_line_when_client_pacing(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=4.0, now=now)
-        self.assertIn("to meet off 1 day goal", tip)
-        self.assertNotIn("off 1 day:", tip)
-        self.assertIn("off 2 days:", tip)
-        self.assertIn("off 3 days:", tip)
+        self.assertIn("Need:", tip)
+        self.assertNotIn("Off 1 day:", tip)
+        self.assertIn("Off 2 days:", tip)
+        self.assertIn("Off 3 days:", tip)
+        # 4h logged already exceeds half of the ~4:27 daily goal
+        self.assertNotIn("halfway", tip)
 
     def test_format_pace_tooltip_shows_active_timer_note(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
         tip = format_pace_tooltip(
             14, 54, 10, today_hours=2.0, now=now, active_elapsed=0.5
         )
-        self.assertIn("−0:30 active timer", tip)
-        self.assertIn("2:00 to meet min goal (5:30PM) (−0:30 active timer) | 2:00 worked today", tip)
+        self.assertIn(
+            "Today: 2hrs & 0min worked (\u22120hrs & 30min active timer)", tip
+        )
+        self.assertIn("Need: 2hrs & 27min more \u2192 done 5:57PM (halfway 3:43PM)", tip)
 
     def test_off_day_lines_respect_days_left(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
         last_day = format_pace_tooltip(14, 54, 0, today_hours=1.0, now=now)
-        self.assertNotIn("off 1 day:", last_day)
-        self.assertNotIn("off 2 days:", last_day)
-        self.assertNotIn("off 3 days:", last_day)
+        self.assertNotIn("Off 1 day:", last_day)
+        self.assertNotIn("Off 2 days:", last_day)
+        self.assertNotIn("Off 3 days:", last_day)
 
         one_left = format_pace_tooltip(14, 54, 1, today_hours=1.0, now=now)
-        self.assertIn("off 1 day:", one_left)
-        self.assertNotIn("off 2 days:", one_left)
-        self.assertNotIn("off 3 days:", one_left)
+        self.assertNotIn("Off 1 day:", one_left)
+        self.assertNotIn("Off 2 days:", one_left)
+        self.assertNotIn("Off 3 days:", one_left)
 
         two_left = format_pace_tooltip(14, 54, 2, today_hours=1.0, now=now)
-        self.assertIn("off 1 day:", two_left)
-        self.assertIn("off 2 days:", two_left)
-        self.assertNotIn("off 3 days:", two_left)
+        self.assertNotIn("Off 1 day:", two_left)
+        self.assertIn("Off 2 days:", two_left)
+        self.assertNotIn("Off 3 days:", two_left)
 
 
 if __name__ == "__main__":

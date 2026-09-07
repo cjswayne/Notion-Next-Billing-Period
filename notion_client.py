@@ -207,18 +207,41 @@ def _normalize_id(value):
     return (value or "").replace("-", "").lower()
 
 
+def _client_text_and_ids(props, client_prop="Task Client Prop", client_rollup_prop="Task Client"):
+    client_text = _formula_string(props.get(client_prop)).lower()
+    relation_ids = [_normalize_id(rid) for rid in _rollup_relation_ids(props.get(client_rollup_prop))]
+    return client_text, relation_ids
+
+
 def row_matches_excluded_client(props, exclude_names=None, exclude_ids=None, client_prop="Task Client Prop", client_rollup_prop="Task Client"):
     """True when the row's client should be dropped from billable hours."""
     exclude_names = exclude_names or []
     exclude_ids = {_normalize_id(i) for i in (exclude_ids or []) if i}
-    client_text = _formula_string(props.get(client_prop)).lower()
+    if not exclude_names and not exclude_ids:
+        return False
+    client_text, relation_ids = _client_text_and_ids(props, client_prop, client_rollup_prop)
     for name in exclude_names:
         if name and name.lower() in client_text:
             return True
-    if exclude_ids:
-        for rid in _rollup_relation_ids(props.get(client_rollup_prop)):
-            if _normalize_id(rid) in exclude_ids:
-                return True
+    for rid in relation_ids:
+        if rid in exclude_ids:
+            return True
+    return False
+
+
+def row_matches_included_client(props, include_names=None, include_ids=None, client_prop="Task Client Prop", client_rollup_prop="Task Client"):
+    """True when the row's client is in the include list (include-only mode)."""
+    include_names = include_names or []
+    include_ids = {_normalize_id(i) for i in (include_ids or []) if i}
+    if not include_names and not include_ids:
+        return True
+    client_text, relation_ids = _client_text_and_ids(props, client_prop, client_rollup_prop)
+    for name in include_names:
+        if name and name.lower() in client_text:
+            return True
+    for rid in relation_ids:
+        if rid in include_ids:
+            return True
     return False
 
 
@@ -271,6 +294,8 @@ def fetch_total_hours(
     agent_user_id=None,
     exclude_client_names=None,
     exclude_client_ids=None,
+    include_client_names=None,
+    include_client_ids=None,
     local_tz=None,
     include_running=True,
 ):
@@ -296,7 +321,14 @@ def fetch_total_hours(
             local_day = _row_local_date(props, date_property, tz)
             if local_day is None or local_day < start or local_day > end:
                 continue
-            if row_matches_excluded_client(
+            if include_client_names or include_client_ids:
+                if not row_matches_included_client(
+                    props,
+                    include_names=include_client_names,
+                    include_ids=include_client_ids,
+                ):
+                    continue
+            elif row_matches_excluded_client(
                 props,
                 exclude_names=exclude_client_names,
                 exclude_ids=exclude_client_ids,
@@ -325,6 +357,8 @@ def fetch_active_timer_start(
     agent_user_id=None,
     exclude_client_names=None,
     exclude_client_ids=None,
+    include_client_names=None,
+    include_client_ids=None,
 ):
     """Return Start datetime of the newest Running timer (or None)."""
     clauses = [{"property": "Status", "select": {"equals": "Running"}}]
@@ -342,7 +376,14 @@ def fetch_active_timer_start(
         data = _request("POST", f"databases/{database_id}/query", token, body)
         for page in data.get("results", []):
             props = page.get("properties", {}) or {}
-            if row_matches_excluded_client(
+            if include_client_names or include_client_ids:
+                if not row_matches_included_client(
+                    props,
+                    include_names=include_client_names,
+                    include_ids=include_client_ids,
+                ):
+                    continue
+            elif row_matches_excluded_client(
                 props,
                 exclude_names=exclude_client_names,
                 exclude_ids=exclude_client_ids,
@@ -415,6 +456,8 @@ def fetch_total_hours_safe(
     agent_user_id=None,
     exclude_client_names=None,
     exclude_client_ids=None,
+    include_client_names=None,
+    include_client_ids=None,
     local_tz=None,
     include_running=True,
 ):
@@ -434,6 +477,8 @@ def fetch_total_hours_safe(
             agent_user_id=agent_user_id,
             exclude_client_names=exclude_client_names,
             exclude_client_ids=exclude_client_ids,
+            include_client_names=include_client_names,
+            include_client_ids=include_client_ids,
             local_tz=local_tz,
             include_running=include_running,
         ),
@@ -447,6 +492,8 @@ def fetch_active_timer_start_safe(
     agent_user_id=None,
     exclude_client_names=None,
     exclude_client_ids=None,
+    include_client_names=None,
+    include_client_ids=None,
 ):
     """Safe wrapper for fetch_active_timer_start."""
     token = _require_token_and_db(database_id)
@@ -460,6 +507,8 @@ def fetch_active_timer_start_safe(
             agent_user_id=agent_user_id,
             exclude_client_names=exclude_client_names,
             exclude_client_ids=exclude_client_ids,
+            include_client_names=include_client_names,
+            include_client_ids=include_client_ids,
         ),
     )
 

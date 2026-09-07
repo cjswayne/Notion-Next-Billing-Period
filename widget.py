@@ -75,23 +75,33 @@ def format_days_left(days):
 
 
 def format_hm(hours):
-    """Format decimal hours as H:MM (hours:minutes)."""
+    """Format decimal hours as 'Hhrs & Mmin'."""
     if hours is None:
         return None
     sign = "-" if hours < 0 else ""
     total_minutes = int(round(abs(float(hours)) * 60))
     h, m = divmod(total_minutes, 60)
-    return f"{sign}{h}:{m:02d}"
+    return f"{sign}{h}hrs & {m}min"
 
 
 def format_hm_prose(hours):
-    """Format decimal hours as 'H hours & M minutes' for the status line only."""
+    """Alias for format_hm (kept for callers that used the prose variant)."""
+    return format_hm(hours)
+
+
+def format_hm_per_day(hours):
+    formatted = format_hm(hours)
+    if formatted is None:
+        return None
+    return f"{formatted} / day"
+
+
+def format_target_hours(hours):
+    """Format a target as whole hours only (no minutes), e.g. 60 -> '60hrs'."""
     if hours is None:
         return None
     sign = "-" if hours < 0 else ""
-    total_minutes = int(round(abs(float(hours)) * 60))
-    h, m = divmod(total_minutes, 60)
-    return f"{sign}{h} hours & {m} minutes"
+    return f"{sign}{int(round(abs(float(hours))))}hrs"
 
 
 def hours_remaining(worked, target):
@@ -174,29 +184,102 @@ def finish_by_label(now, hours_needed):
     return f"({format_clock(finish)})"
 
 
-def format_status_line(days_left, worked, target, today_hours=0.0, now=None):
+def halfway_by_label(now, hours_needed):
+    """Clock time at the halfway point of hours_needed from now."""
+    if now is None or hours_needed is None:
+        return ""
+    halfway = finish_by_datetime(now, float(hours_needed) / 2)
+    if halfway is None:
+        return ""
+    return format_clock(halfway)
+
+
+def halfway_clock_label(now, per_day_hours, worked_today_hours=0.0):
+    """Clock time when today's logged hours reach half of the full per-day
+    goal (not half of what's left). Empty once that halfway point has
+    already passed, since already-worked hours count toward it."""
+    if now is None or per_day_hours is None:
+        return ""
+    remaining_to_half = float(per_day_hours) / 2.0 - float(worked_today_hours or 0)
+    if remaining_to_half <= 0:
+        return ""
+    dt = finish_by_datetime(now, remaining_to_half)
+    if dt is None:
+        return ""
+    return format_clock(dt)
+
+
+def widget_days_off(days_left):
+    """Always pace the widget for one day off when the period allows it."""
+    return 1 if days_left >= 1 else 0
+
+
+def format_status_line(
+    days_left,
+    worked,
+    target,
+    today_hours=0.0,
+    now=None,
+    app_worked=None,
+    app_target=None,
+    app_today_hours=0.0,
+):
+    """Single-line summary: per-day pace for client (and app, if tracked), plus
+    a combined finish time that accounts for both goals' remaining hours today."""
     days_part = format_days_left(days_left)
     if worked is None:
         return f"{days_part} | …"
     remaining = hours_remaining(worked, target)
     if remaining is None:
-        return f"{days_part} | {format_hm_prose(worked)}"
-    if remaining <= 0:
+        return f"{days_part} | {format_hm(worked)}"
+
+    app_tracked = app_target is not None
+    app_remaining = hours_remaining(app_worked or 0, app_target) if app_tracked else None
+    client_done = remaining <= 0
+    app_done = app_tracked and app_remaining is not None and app_remaining <= 0
+
+    if client_done and (not app_tracked or app_done):
         return f"{days_part} | done"
 
-    off = current_goal_days_off(worked, today_hours, target, days_left)
-    if off is None:
-        return f"{days_part} | done"
-    per_day = hours_per_day(remaining, days_left, days_off=off)
-    to_meet = hours_to_meet_day_goal(
-        worked, today_hours, target, days_left, days_off=off
-    )
-    finish = finish_by_datetime(now, to_meet)
-    if to_meet is not None and to_meet <= 0:
-        return f"{days_part} | {format_hm_prose(per_day)} per day | met"
-    if finish is None:
-        return f"{days_part} | {format_hm_prose(per_day)} per day"
-    return f"{days_part} | {format_hm_prose(per_day)} per day | {format_clock(finish)}"
+    off = widget_days_off(days_left)
+    parts = [days_part]
+
+    client_per_day = None
+    client_to_meet = 0.0
+    if client_done:
+        parts.append("client done")
+    else:
+        client_per_day = hours_per_day(remaining, days_left, days_off=off)
+        client_to_meet = hours_to_meet_day_goal(
+            worked, today_hours, target, days_left, days_off=off
+        )
+        parts.append(f"client {format_hm_per_day(client_per_day)}")
+
+    app_to_meet = 0.0
+    if app_tracked:
+        if app_done:
+            parts.append("app done")
+        else:
+            app_per_day = hours_per_day(app_remaining, days_left, days_off=off)
+            app_to_meet = hours_to_meet_day_goal(
+                app_worked or 0, app_today_hours, app_target, days_left, days_off=off
+            )
+            parts.append(f"app {format_hm_per_day(app_per_day)}")
+
+    combined_to_meet = client_to_meet + app_to_meet
+    if combined_to_meet <= 0:
+        parts.append("met today")
+    else:
+        parts.append(f"{format_hm(combined_to_meet)} left today")
+        finish = finish_by_datetime(now, combined_to_meet)
+        if finish is not None:
+            # Halfway is specifically about the client goal, not the combined total
+            halfway = "" if client_done else halfway_clock_label(now, client_per_day, today_hours)
+            if halfway:
+                parts.append(f"halfway {halfway}")
+            parts.append(f"done {format_clock(finish)}")
+
+    return " | ".join(parts)
 
 
 def format_active_timer_note(active_elapsed):
@@ -218,41 +301,98 @@ def format_pace_tooltip(
     today_hours=0.0,
     now=None,
     active_elapsed=0.0,
+    app_worked=None,
+    app_target=None,
+    app_today_hours=0.0,
+    app_active_elapsed=0.0,
 ):
+    """Multi-line breakdown: remaining/target/pace per goal, today's progress,
+    and a combined 'need more today' line whose finish/halfway times include
+    both client and app hours. Off-2/off-3 'what if I take more days off'
+    rows stay client-only and only show while the client target is open."""
     remaining = hours_remaining(worked, target)
     if remaining is None:
         return f"{format_hm(worked)} logged (no target set)"
-    if remaining <= 0:
-        return f"target hit (+{format_hm(-remaining)})"
-    active_note = format_active_timer_note(active_elapsed)
-    current_off = current_goal_days_off(worked, today_hours, target, days_left)
-    if current_off is None:
-        return f"target hit (+{format_hm(-remaining)})"
 
-    to_current = hours_to_meet_day_goal(
-        worked, today_hours, target, days_left, days_off=current_off
-    )
-    lines = [
-        f"{format_hm(remaining)} left to {format_hm(target)}",
-        (
-            f"{format_hm(to_current)} to meet {goal_tier_label(current_off)} "
-            f"{finish_by_label(now, to_current)}"
-            f"{active_note} | {format_hm(today_hours or 0)} worked today"
-        ),
-    ]
-    # Higher days-off tiers only (current min already shown above)
-    for off in (1, 2, 3):
-        if off > days_left or off <= current_off:
-            continue
-        per_day = hours_per_day(remaining, days_left, days_off=off)
-        to_meet = hours_to_meet_day_goal(
+    app_tracked = app_target is not None
+    app_remaining = hours_remaining(app_worked or 0, app_target) if app_tracked else None
+    client_done = remaining <= 0
+    app_done = app_tracked and app_remaining is not None and app_remaining <= 0
+    off = widget_days_off(days_left)
+
+    lines = []
+    client_per_day = None
+    if client_done:
+        lines.append(f"Client: done (+{format_hm(-remaining)})")
+    else:
+        client_per_day = hours_per_day(remaining, days_left, days_off=off)
+        lines.append(
+            f"Client: {format_hm(remaining)} left of {format_target_hours(target)} "
+            f"({format_hm_per_day(client_per_day)})"
+        )
+    app_per_day = None
+    if app_tracked:
+        if app_done:
+            lines.append(f"App: done (+{format_hm(-app_remaining)})")
+        else:
+            app_per_day = hours_per_day(app_remaining, days_left, days_off=off)
+            lines.append(
+                f"App: {format_hm(app_remaining)} left of {format_target_hours(app_target)} "
+                f"({format_hm_per_day(app_per_day)})"
+            )
+
+    if client_done and (not app_tracked or app_done):
+        return "\n".join(lines)
+
+    lines.append("")
+
+    active_note = format_active_timer_note(active_elapsed)
+    app_active_note = format_active_timer_note(app_active_elapsed)
+    today_line = f"Today: {format_hm(today_hours or 0)} worked{active_note}"
+    if app_tracked:
+        today_line += f" | {format_hm(app_today_hours or 0)} app{app_active_note}"
+    lines.append(today_line)
+
+    client_to_meet = 0.0
+    if not client_done:
+        client_to_meet = hours_to_meet_day_goal(
             worked, today_hours, target, days_left, days_off=off
         )
-        label = "day" if off == 1 else "days"
-        lines.append(
-            f"off {off} {label}: {format_hm(per_day)}/day | "
-            f"{format_hm(to_meet)} to meet {finish_by_label(now, to_meet)}{active_note}"
+    app_to_meet = 0.0
+    if app_tracked and not app_done:
+        app_to_meet = hours_to_meet_day_goal(
+            app_worked or 0, app_today_hours, app_target, days_left, days_off=off
         )
+    combined_to_meet = client_to_meet + app_to_meet
+
+    if combined_to_meet <= 0:
+        lines.append("Met today's goal")
+    else:
+        finish = finish_by_datetime(now, combined_to_meet)
+        need_line = f"Need: {format_hm(combined_to_meet)} more"
+        if finish is not None:
+            need_line += f" \u2192 done {format_clock(finish)}"
+            # Halfway is specifically about the client goal, not the combined total
+            halfway = "" if client_done else halfway_clock_label(now, client_per_day, today_hours)
+            if halfway:
+                need_line += f" (halfway {halfway})"
+        lines.append(need_line)
+
+    if not client_done:
+        for off_n in (2, 3):
+            if off_n > days_left:
+                continue
+            per_day = hours_per_day(remaining, days_left, days_off=off_n)
+            to_meet = hours_to_meet_day_goal(
+                worked, today_hours, target, days_left, days_off=off_n
+            )
+            finish = finish_by_datetime(now, to_meet)
+            label = "day" if off_n == 1 else "days"
+            line = f"Off {off_n} {label}: client {format_hm_per_day(per_day)}"
+            if finish is not None:
+                line += f" \u2192 done {format_clock(finish)}"
+            lines.append(line)
+
     return "\n".join(lines)
 
 
@@ -422,8 +562,11 @@ class Widget:
 
         self._drag_offset = (0, 0)
         self._worked_hours = None
+        self._app_worked_hours = None
         self._today_stopped_hours = 0.0
+        self._app_today_stopped_hours = 0.0
         self._active_timer_start = None
+        self._app_active_timer_start = None
         self._hours_error = None
         self._notion_lock = threading.Lock()
 
@@ -504,6 +647,7 @@ class Widget:
         days = days_until_next_end(today, end_days)
 
         target = self.config.get("target_hours")
+        app_target = self.config.get("target_app_hours")
         rate = self.config.get("hourly_rate")
         show_hours = bool(self.config.get("show_hours_line", True))
         show_earn = bool(self.config.get("show_earnings_line", True))
@@ -517,10 +661,18 @@ class Widget:
             else:
                 today_hours = 0.0
                 active_elapsed = 0.0
+                app_today_hours = 0.0
+                app_active_elapsed = 0.0
                 if self._worked_hours is not None:
                     today_hours, active_elapsed = effective_today_hours(
                         self._today_stopped_hours,
                         self._active_timer_start,
+                        now=now,
+                    )
+                if self._app_worked_hours is not None:
+                    app_today_hours, app_active_elapsed = effective_today_hours(
+                        self._app_today_stopped_hours,
+                        self._app_active_timer_start,
                         now=now,
                     )
                 self.hours_label.configure(
@@ -530,6 +682,9 @@ class Widget:
                         target,
                         today_hours=today_hours,
                         now=now,
+                        app_worked=self._app_worked_hours,
+                        app_target=app_target,
+                        app_today_hours=app_today_hours,
                     )
                 )
                 if self._worked_hours is not None:
@@ -541,6 +696,10 @@ class Widget:
                             today_hours=today_hours,
                             now=now,
                             active_elapsed=active_elapsed,
+                            app_worked=self._app_worked_hours,
+                            app_target=app_target,
+                            app_today_hours=app_today_hours,
+                            app_active_elapsed=app_active_elapsed,
                         )
                     )
                 else:
@@ -611,6 +770,14 @@ class Widget:
                     exclude_client_ids=self.config.get("notion_exclude_client_ids") or [],
                     local_tz=self.tz,
                 )
+                app_fetch_kwargs = dict(
+                    end_property=fetch_kwargs["end_property"],
+                    agent_property=fetch_kwargs["agent_property"],
+                    agent_user_id=fetch_kwargs["agent_user_id"],
+                    include_client_names=self.config.get("notion_app_client_names") or [],
+                    include_client_ids=self.config.get("notion_app_client_ids") or [],
+                    local_tz=self.tz,
+                )
                 database_id = self.config["notion_database_id"]
                 hours_property = self.config.get("notion_hours_property", "Time (Hrs)")
                 date_property = self.config.get("notion_date_property", "Start")
@@ -618,10 +785,19 @@ class Widget:
                     total, _rows = fetch_total_hours_safe(
                         database_id, hours_property, date_property, start, end, **fetch_kwargs
                     )
+                    app_total, _app_rows = fetch_total_hours_safe(
+                        database_id,
+                        hours_property,
+                        date_property,
+                        start,
+                        end,
+                        **app_fetch_kwargs,
+                    )
                     today_stopped = 0.0
+                    app_today_stopped = 0.0
                     active_start = None
+                    app_active_start = None
                     if bool(self.config.get("notion_exclude_today", True)):
-                        # Stopped-only today; active Running time is applied live from Start
                         today_stopped, _today_rows = fetch_total_hours_safe(
                             database_id,
                             hours_property,
@@ -631,6 +807,15 @@ class Widget:
                             include_running=False,
                             **fetch_kwargs,
                         )
+                        app_today_stopped, _app_today_rows = fetch_total_hours_safe(
+                            database_id,
+                            hours_property,
+                            date_property,
+                            today,
+                            today,
+                            include_running=False,
+                            **app_fetch_kwargs,
+                        )
                         active_start = fetch_active_timer_start_safe(
                             database_id,
                             date_property,
@@ -639,14 +824,26 @@ class Widget:
                             exclude_client_names=fetch_kwargs.get("exclude_client_names"),
                             exclude_client_ids=fetch_kwargs.get("exclude_client_ids"),
                         )
-                    worked, err = total, None
+                        app_active_start = fetch_active_timer_start_safe(
+                            database_id,
+                            date_property,
+                            agent_property=app_fetch_kwargs.get("agent_property"),
+                            agent_user_id=app_fetch_kwargs.get("agent_user_id"),
+                            include_client_names=app_fetch_kwargs.get("include_client_names"),
+                            include_client_ids=app_fetch_kwargs.get("include_client_ids"),
+                        )
+                    worked, app_worked, err = total, app_total, None
                 except NotionError as e:
-                    worked, today_stopped, active_start, err = None, 0.0, None, str(e)
+                    worked, app_worked, today_stopped, app_today_stopped = None, None, 0.0, 0.0
+                    active_start, app_active_start, err = None, None, str(e)
 
                 def apply():
                     self._worked_hours = worked
+                    self._app_worked_hours = app_worked
                     self._today_stopped_hours = today_stopped
+                    self._app_today_stopped_hours = app_today_stopped
                     self._active_timer_start = active_start
+                    self._app_active_timer_start = app_active_start
                     self._hours_error = err
                     self.render()
                 self.root.after(0, apply)

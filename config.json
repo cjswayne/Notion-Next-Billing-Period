@@ -2,7 +2,8 @@
   "billing_period_end_days": [14, "last"],
   "timezone": "America/Los_Angeles",
 
-  "target_hours": 54,
+  "target_hours": 60,
+  "target_app_hours": 20,
   "hourly_rate": 0,
 
   "notion_database_id": "bdee81ae7ce84375b0f340e7895828ac",
@@ -14,6 +15,8 @@
   "notion_exclude_today": true,
   "notion_exclude_client_names": ["JadePuma Apps"],
   "notion_exclude_client_ids": ["59c6169f-08fb-4a17-901e-4c375bf18d7b"],
+  "notion_app_client_names": ["JadePuma Apps"],
+  "notion_app_client_ids": ["59c6169f-08fb-4a17-901e-4c375bf18d7b"],
   "notion_refresh_minutes": 15,
 
   "show_hours_line": true,
