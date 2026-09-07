@@ -224,8 +224,9 @@ def format_status_line(
     app_target=None,
     app_today_hours=0.0,
 ):
-    """Single-line summary: per-day pace for client (and app, if tracked), plus
-    a combined finish time that accounts for both goals' remaining hours today."""
+    """Single-line summary: per-day pace for client (and app, if tracked), the
+    minimum still needed today in client hours only, and a combined finish
+    time that accounts for both goals' remaining hours today."""
     days_part = format_days_left(days_left)
     if worked is None:
         return f"{days_part} | …"
@@ -270,10 +271,13 @@ def format_status_line(
     if combined_to_meet <= 0:
         parts.append("met today")
     else:
-        parts.append(f"{format_hm(combined_to_meet)} left today")
+        # "Left today" is client hours only, matching the client-only halfway below
+        if not client_done:
+            parts.append(f"client {format_hm(client_to_meet)} left today")
         finish = finish_by_datetime(now, combined_to_meet)
         if finish is not None:
-            # Halfway is specifically about the client goal, not the combined total
+            # Halfway is specifically about the client goal, not the combined total.
+            # Hidden once today's logged client hours pass the halfway mark.
             halfway = "" if client_done else halfway_clock_label(now, client_per_day, today_hours)
             if halfway:
                 parts.append(f"halfway {halfway}")
@@ -379,6 +383,16 @@ def format_pace_tooltip(
         lines.append(need_line)
 
     if not client_done:
+        no_off_per_day = hours_per_day(remaining, days_left, days_off=0)
+        no_off_to_meet = hours_to_meet_day_goal(
+            worked, today_hours, target, days_left, days_off=0
+        )
+        no_off_finish = finish_by_datetime(now, no_off_to_meet)
+        no_off_line = f"Off No Days: client {format_hm_per_day(no_off_per_day)}"
+        if no_off_finish is not None:
+            no_off_line += f" \u2192 done {format_clock(no_off_finish)}"
+        lines.append(no_off_line)
+
         for off_n in (2, 3):
             if off_n > days_left:
                 continue

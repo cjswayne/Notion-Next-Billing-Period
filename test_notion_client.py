@@ -208,7 +208,7 @@ class TestPaceMath(unittest.TestCase):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=0, now=now),
-            "10 days left | client 4hrs & 27min / day | 4hrs & 27min left today | "
+            "10 days left | client 4hrs & 27min / day | client 4hrs & 27min left today | "
             "halfway 5:43PM | done 7:57PM",
         )
         self.assertEqual(format_status_line(10, 60, 54, today_hours=0, now=now), "10 days left | done")
@@ -221,7 +221,9 @@ class TestPaceMath(unittest.TestCase):
         )
         self.assertIn("client 4hrs & 27min / day", line)
         self.assertIn("app 1hrs & 40min / day", line)
-        self.assertIn("6hrs & 7min left today", line)
+        # "Left today" is client-only, matching the client-only halfway
+        self.assertIn("client 4hrs & 27min left today", line)
+        self.assertNotIn("6hrs & 7min left today", line)
         # Finish stays combined (client+app), but halfway is client-only
         self.assertIn("done 9:37PM", line)
         self.assertIn("halfway 5:43PM", line)
@@ -233,8 +235,9 @@ class TestPaceMath(unittest.TestCase):
         )
         self.assertIn("client done", line)
         self.assertIn("app 1hrs & 40min / day", line)
-        self.assertIn("1hrs & 40min left today", line)
         self.assertIn("done 5:10PM", line)
+        # No client pacing left to show once the client's period target is met
+        self.assertNotIn("left today", line)
         # Halfway is a client-only concept; no client goal left means no halfway
         self.assertNotIn("halfway", line)
 
@@ -253,8 +256,19 @@ class TestPaceMath(unittest.TestCase):
         # so the halfway point has already passed and should not be shown.
         self.assertEqual(
             format_status_line(10, 14, 54, today_hours=4.0, now=now),
-            "10 days left | client 4hrs & 27min / day | 0hrs & 27min left today | done 3:57PM",
+            "10 days left | client 4hrs & 27min / day | client 0hrs & 27min left today | "
+            "done 3:57PM",
         )
+
+    def test_format_status_line_hides_halfway_exactly_at_the_halfway_point(self):
+        now = datetime(2026, 8, 4, 12, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # target=8, worked=0, days_left=2 -> off=1 -> per_day = 8/(2-1) = 8.0h, half = 4.0h
+        before = format_status_line(2, 0, 8, today_hours=3.99, now=now)
+        self.assertIn("halfway", before)
+        at_halfway = format_status_line(2, 0, 8, today_hours=4.0, now=now)
+        self.assertNotIn("halfway", at_halfway)
+        after = format_status_line(2, 0, 8, today_hours=4.01, now=now)
+        self.assertNotIn("halfway", after)
 
     def test_halfway_clock_label_accounts_for_hours_already_worked(self):
         now = datetime(2026, 8, 4, 12, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -296,9 +310,19 @@ class TestPaceMath(unittest.TestCase):
         self.assertIn("Today: 1hrs & 30min worked", tip)
         # Halfway accounts for the 1:30 already logged today, not half of the remaining 2:57
         self.assertIn("Need: 2hrs & 57min more \u2192 done 6:27PM (halfway 4:13PM)", tip)
+        self.assertIn("Off No Days: client 4hrs & 0min / day \u2192 done 6:00PM", tip)
         self.assertNotIn("Off 1 day:", tip)
         self.assertIn("Off 2 days: client 5hrs & 0min / day \u2192 done 7:00PM", tip)
         self.assertIn("Off 3 days: client 5hrs & 43min / day \u2192 done 7:43PM", tip)
+
+    def test_format_pace_tooltip_off_no_days_appears_above_off_tiers(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
+        tip = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now)
+        lines = tip.split("\n")
+        self.assertLess(
+            lines.index("Off No Days: client 4hrs & 0min / day \u2192 done 6:00PM"),
+            next(i for i, l in enumerate(lines) if l.startswith("Off 2 days:")),
+        )
 
     def test_format_pace_tooltip_client_done_app_not(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -310,6 +334,7 @@ class TestPaceMath(unittest.TestCase):
         self.assertIn("Need: 1hrs & 40min more \u2192 done 5:10PM", tip)
         # Halfway is a client-only concept; client target already hit
         self.assertNotIn("halfway", tip)
+        self.assertNotIn("Off No Days", tip)
         self.assertNotIn("Off 2 days", tip)
         self.assertNotIn("Off 3 days", tip)
 
