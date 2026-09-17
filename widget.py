@@ -330,6 +330,7 @@ def format_pace_tooltip(
     app_target=None,
     app_today_hours=0.0,
     app_active_elapsed=0.0,
+    days_off=None,
 ):
     """Multi-line breakdown: remaining/target/pace per goal, today's progress,
     and a combined 'need more today' line whose finish/halfway times include
@@ -343,7 +344,10 @@ def format_pace_tooltip(
     app_remaining = hours_remaining(app_worked or 0, app_target) if app_tracked else None
     client_done = remaining <= 0
     app_done = app_tracked and app_remaining is not None and app_remaining <= 0
-    off = widget_days_off(days_left)
+    if days_off is None:
+        off = widget_days_off(days_left)
+    else:
+        off = widget_days_off(days_left, preferred=days_off)
 
     lines = []
     client_per_day = None
@@ -748,6 +752,7 @@ class Widget:
                             app_target=app_target,
                             app_today_hours=app_today_hours,
                             app_active_elapsed=app_active_elapsed,
+                            days_off=self.config.get("widget_days_off", 1),
                         )
                     )
                 else:

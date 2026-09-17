@@ -339,6 +339,15 @@ class TestPaceMath(unittest.TestCase):
         self.assertIn("Off 2 days: client 5hrs & 0min / day \u2192 done 7:00PM", tip)
         self.assertIn("Off 3 days: client 5hrs & 43min / day \u2192 done 7:43PM", tip)
 
+    def test_format_pace_tooltip_respects_days_off(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
+        tip1 = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now, days_off=1)
+        self.assertIn("Need: 2hrs & 57min more", tip1)
+        self.assertIn("(4hrs & 27min / day)", tip1)
+        tip2 = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now, days_off=2)
+        self.assertIn("Need: 3hrs & 30min more", tip2)
+        self.assertIn("(5hrs & 0min / day)", tip2)
+
     def test_format_pace_tooltip_off_no_days_appears_above_off_tiers(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now)
