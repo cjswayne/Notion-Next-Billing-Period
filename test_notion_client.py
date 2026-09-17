@@ -224,9 +224,19 @@ class TestPaceMath(unittest.TestCase):
         # "Left today" is client-only, matching the client-only halfway
         self.assertIn("client 4hrs & 27min left today", line)
         self.assertNotIn("6hrs & 7min left today", line)
-        # Finish stays combined (client+app), but halfway is client-only
-        self.assertIn("done 9:37PM", line)
+        # Client-only finish time, shown next to the combined (client+app) finish time
+        self.assertIn("client off 7:57PM", line)
+        self.assertIn("+app off 9:37PM", line)
         self.assertIn("halfway 5:43PM", line)
+
+    def test_format_status_line_hides_app_when_no_app_target(self):
+        now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+        # Even if app_worked is passed, no app_target means app is not tracked
+        line = format_status_line(
+            10, 14, 54, today_hours=0, now=now, app_worked=5, app_target=None
+        )
+        self.assertNotIn("app ", line)
+        self.assertIn("client ", line)
 
     def test_format_status_line_client_done_app_not(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -249,6 +259,20 @@ class TestPaceMath(unittest.TestCase):
         self.assertEqual(widget_days_off(10), 1)
         self.assertEqual(widget_days_off(1), 1)
         self.assertEqual(widget_days_off(0), 0)
+        self.assertEqual(widget_days_off(10, preferred=0), 0)
+        self.assertEqual(widget_days_off(10, preferred=2), 2)
+        self.assertEqual(widget_days_off(10, preferred=3), 3)
+        self.assertEqual(widget_days_off(2, preferred=3), 2)
+        self.assertEqual(widget_days_off(5, preferred=-1), 0)
+
+    def test_format_status_line_respects_days_off(self):
+        line0 = format_status_line(10, 14, 54, days_off=0)
+        self.assertIn("client 4hrs & 0min / day", line0)
+        line2 = format_status_line(10, 14, 54, days_off=2)
+        self.assertIn("client 5hrs & 0min / day", line2)
+        # Default remains off-1 pacing
+        line_default = format_status_line(10, 14, 54)
+        self.assertIn("client 4hrs & 27min / day", line_default)
 
     def test_format_status_line_off_one_with_progress(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -311,7 +335,7 @@ class TestPaceMath(unittest.TestCase):
         # Halfway accounts for the 1:30 already logged today, not half of the remaining 2:57
         self.assertIn("Need: 2hrs & 57min more \u2192 done 6:27PM (halfway 4:13PM)", tip)
         self.assertIn("Off No Days: client 4hrs & 0min / day \u2192 done 6:00PM", tip)
-        self.assertNotIn("Off 1 day:", tip)
+        self.assertIn("Off 1 day: client 4hrs & 27min / day \u2192 done 6:27PM", tip)
         self.assertIn("Off 2 days: client 5hrs & 0min / day \u2192 done 7:00PM", tip)
         self.assertIn("Off 3 days: client 5hrs & 43min / day \u2192 done 7:43PM", tip)
 
@@ -319,10 +343,11 @@ class TestPaceMath(unittest.TestCase):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/New_York"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=1.5, now=now)
         lines = tip.split("\n")
-        self.assertLess(
-            lines.index("Off No Days: client 4hrs & 0min / day \u2192 done 6:00PM"),
-            next(i for i, l in enumerate(lines) if l.startswith("Off 2 days:")),
-        )
+        no_days_i = lines.index("Off No Days: client 4hrs & 0min / day \u2192 done 6:00PM")
+        off1_i = lines.index("Off 1 day: client 4hrs & 27min / day \u2192 done 6:27PM")
+        off2_i = next(i for i, l in enumerate(lines) if l.startswith("Off 2 days:"))
+        self.assertLess(no_days_i, off1_i)
+        self.assertLess(off1_i, off2_i)
 
     def test_format_pace_tooltip_client_done_app_not(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -346,14 +371,17 @@ class TestPaceMath(unittest.TestCase):
         self.assertIn("Client: 40hrs & 0min left of 54hrs (4hrs & 27min / day)", tip)
         self.assertIn("App: 15hrs & 0min left of 20hrs (1hrs & 40min / day)", tip)
         self.assertIn("Today: 1hrs & 30min worked | 0hrs & 0min app", tip)
-        # Need/finish are combined (client+app), but halfway is client-only
-        self.assertIn("Need: 4hrs & 37min more \u2192 done 8:07PM (halfway 4:13PM)", tip)
+        # Need line shows the client-only finish next to the combined (client+app) finish
+        self.assertIn(
+            "Need: 4hrs & 37min more \u2192 client off 6:27PM, +app off 8:07PM (halfway 4:13PM)",
+            tip,
+        )
 
     def test_format_pace_tooltip_still_shows_need_line_when_client_pacing(self):
         now = datetime(2026, 8, 4, 15, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
         tip = format_pace_tooltip(14, 54, 10, today_hours=4.0, now=now)
         self.assertIn("Need:", tip)
-        self.assertNotIn("Off 1 day:", tip)
+        self.assertIn("Off 1 day:", tip)
         self.assertIn("Off 2 days:", tip)
         self.assertIn("Off 3 days:", tip)
         # 4h logged already exceeds half of the ~4:27 daily goal
@@ -377,12 +405,12 @@ class TestPaceMath(unittest.TestCase):
         self.assertNotIn("Off 3 days:", last_day)
 
         one_left = format_pace_tooltip(14, 54, 1, today_hours=1.0, now=now)
-        self.assertNotIn("Off 1 day:", one_left)
+        self.assertIn("Off 1 day:", one_left)
         self.assertNotIn("Off 2 days:", one_left)
         self.assertNotIn("Off 3 days:", one_left)
 
         two_left = format_pace_tooltip(14, 54, 2, today_hours=1.0, now=now)
-        self.assertNotIn("Off 1 day:", two_left)
+        self.assertIn("Off 1 day:", two_left)
         self.assertIn("Off 2 days:", two_left)
         self.assertNotIn("Off 3 days:", two_left)
 

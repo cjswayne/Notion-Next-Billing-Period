@@ -2,7 +2,7 @@
   "billing_period_end_days": [14, "last"],
   "timezone": "America/Los_Angeles",
 
-  "target_hours": 60,
+  "target_hours": 70,
   "target_app_hours": 20,
   "hourly_rate": 0,
 
@@ -21,11 +21,13 @@
 
   "show_hours_line": true,
   "show_earnings_line": true,
+  "show_app_hours": false,
 
   "always_on_top": false,
   "opacity": 0.85,
   "font_family": "Segoe UI",
   "font_size": 10,
   "fg_color": "#e6e6e6",
-  "bg_color": "#1e1e1e"
+  "bg_color": "#1e1e1e",
+  "widget_days_off": 2
 }

@@ -209,9 +209,17 @@ def halfway_clock_label(now, per_day_hours, worked_today_hours=0.0):
     return format_clock(dt)
 
 
-def widget_days_off(days_left):
-    """Always pace the widget for one day off when the period allows it."""
-    return 1 if days_left >= 1 else 0
+def widget_days_off(days_left, preferred=1):
+    """Pace the widget assuming `preferred` days off, capped by days left."""
+    try:
+        preferred = int(preferred)
+    except (TypeError, ValueError):
+        preferred = 1
+    if preferred < 0:
+        preferred = 0
+    if days_left <= 0:
+        return 0
+    return min(preferred, days_left)
 
 
 def format_status_line(
@@ -223,6 +231,7 @@ def format_status_line(
     app_worked=None,
     app_target=None,
     app_today_hours=0.0,
+    days_off=None,
 ):
     """Single-line summary: per-day pace for client (and app, if tracked), the
     minimum still needed today in client hours only, and a combined finish
@@ -242,7 +251,10 @@ def format_status_line(
     if client_done and (not app_tracked or app_done):
         return f"{days_part} | done"
 
-    off = widget_days_off(days_left)
+    if days_off is None:
+        off = widget_days_off(days_left)
+    else:
+        off = widget_days_off(days_left, preferred=days_off)
     parts = [days_part]
 
     client_per_day = None
@@ -281,7 +293,16 @@ def format_status_line(
             halfway = "" if client_done else halfway_clock_label(now, client_per_day, today_hours)
             if halfway:
                 parts.append(f"halfway {halfway}")
-            parts.append(f"done {format_clock(finish)}")
+            # When app hours add extra time beyond the client goal, show both the
+            # client-only finish time and the finish time once app hours are included.
+            client_only_finish = (
+                finish_by_datetime(now, client_to_meet) if not client_done else None
+            )
+            if client_only_finish is not None and app_to_meet > 0:
+                parts.append(f"client off {format_clock(client_only_finish)}")
+                parts.append(f"+app off {format_clock(finish)}")
+            else:
+                parts.append(f"done {format_clock(finish)}")
 
     return " | ".join(parts)
 
@@ -312,7 +333,7 @@ def format_pace_tooltip(
 ):
     """Multi-line breakdown: remaining/target/pace per goal, today's progress,
     and a combined 'need more today' line whose finish/halfway times include
-    both client and app hours. Off-2/off-3 'what if I take more days off'
+    both client and app hours. Off-1/off-2/off-3 'what if I take more days off'
     rows stay client-only and only show while the client target is open."""
     remaining = hours_remaining(worked, target)
     if remaining is None:
@@ -375,7 +396,18 @@ def format_pace_tooltip(
         finish = finish_by_datetime(now, combined_to_meet)
         need_line = f"Need: {format_hm(combined_to_meet)} more"
         if finish is not None:
-            need_line += f" \u2192 done {format_clock(finish)}"
+            # When app hours add extra time beyond the client goal, show both the
+            # client-only finish time and the finish time once app hours are included.
+            client_only_finish = (
+                finish_by_datetime(now, client_to_meet) if not client_done else None
+            )
+            if client_only_finish is not None and app_to_meet > 0:
+                need_line += (
+                    f" \u2192 client off {format_clock(client_only_finish)}, "
+                    f"+app off {format_clock(finish)}"
+                )
+            else:
+                need_line += f" \u2192 done {format_clock(finish)}"
             # Halfway is specifically about the client goal, not the combined total
             halfway = "" if client_done else halfway_clock_label(now, client_per_day, today_hours)
             if halfway:
@@ -393,7 +425,7 @@ def format_pace_tooltip(
             no_off_line += f" \u2192 done {format_clock(no_off_finish)}"
         lines.append(no_off_line)
 
-        for off_n in (2, 3):
+        for off_n in (1, 2, 3):
             if off_n > days_left:
                 continue
             per_day = hours_per_day(remaining, days_left, days_off=off_n)
@@ -661,7 +693,8 @@ class Widget:
         days = days_until_next_end(today, end_days)
 
         target = self.config.get("target_hours")
-        app_target = self.config.get("target_app_hours")
+        show_app = bool(self.config.get("show_app_hours", True))
+        app_target = self.config.get("target_app_hours") if show_app else None
         rate = self.config.get("hourly_rate")
         show_hours = bool(self.config.get("show_hours_line", True))
         show_earn = bool(self.config.get("show_earnings_line", True))
@@ -699,6 +732,7 @@ class Widget:
                         app_worked=self._app_worked_hours,
                         app_target=app_target,
                         app_today_hours=app_today_hours,
+                        days_off=self.config.get("widget_days_off", 1),
                     )
                 )
                 if self._worked_hours is not None:
