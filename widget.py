@@ -889,7 +889,7 @@ class Widget:
         self.root.after(ms_until_midnight, self.update_text)
 
     def schedule_periodic_hours_refresh(self):
-        refresh_min = float(self.config.get("notion_refresh_minutes", 15))
+        refresh_min = float(self.config.get("notion_refresh_minutes", 1))
         if refresh_min > 0:
             self.root.after(int(refresh_min * 60_000), self._periodic_hours_tick)
 

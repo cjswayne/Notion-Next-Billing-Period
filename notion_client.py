@@ -109,8 +109,19 @@ def _request(method, path, token, body=None, timeout=30):
     req = urllib.request.Request(
         f"{NOTION_API}/{path}", data=data, headers=_headers(token), method=method
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    # Connections get reset now and then (e.g. WinError 10054); retry those a few
+    # times. HTTP errors (bad token, bad request, ...) are not transient, so raise.
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(1.5 * (attempt + 1))
 
 
 def _extract_number(prop):

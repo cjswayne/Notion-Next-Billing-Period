@@ -17,7 +17,7 @@
   "notion_exclude_client_ids": ["59c6169f-08fb-4a17-901e-4c375bf18d7b"],
   "notion_app_client_names": ["JadePuma Apps"],
   "notion_app_client_ids": ["59c6169f-08fb-4a17-901e-4c375bf18d7b"],
-  "notion_refresh_minutes": 15,
+  "notion_refresh_minutes": 1,
 
   "show_hours_line": true,
   "show_earnings_line": true,
