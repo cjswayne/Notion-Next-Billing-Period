@@ -18,6 +18,7 @@ from notion_client import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.json"
 POSITION_PATH = SCRIPT_DIR / ".position"
+CUSTOM_GOAL_PATH = SCRIPT_DIR / ".custom_goal"
 
 
 def load_config():
@@ -111,13 +112,15 @@ def hours_remaining(worked, target):
 
 
 def hours_per_day(remaining, days_left, days_off=0):
-    """Spread remaining hours over days_left minus optional days off."""
+    """Spread remaining hours over the days left plus today (days_left counts
+    days until the end day, so "1 day left" means today and tomorrow), minus
+    optional days off."""
     if remaining is None:
         return None
-    work_days = days_left - days_off
-    # Pitfall: last day / taking more days off than remain → treat as one day
+    work_days = max(days_left, 0) + 1 - days_off
+    # Pitfall: taking more days off than remain → treat as one day
     if work_days <= 0:
-        work_days = 1 if days_left >= 0 else 1
+        work_days = 1
     return remaining / work_days
 
 
@@ -232,6 +235,7 @@ def format_status_line(
     app_target=None,
     app_today_hours=0.0,
     days_off=None,
+    custom_goal=None,
 ):
     """Single-line summary: per-day pace for client (and app, if tracked), the
     minimum still needed today in client hours only, and a combined finish
@@ -262,10 +266,15 @@ def format_status_line(
     if client_done:
         parts.append("client done")
     else:
-        client_per_day = hours_per_day(remaining, days_left, days_off=off)
-        client_to_meet = hours_to_meet_day_goal(
-            worked, today_hours, target, days_left, days_off=off
-        )
+        if custom_goal is not None:
+            # A custom goal replaces the recommended daily pace for client hours
+            client_per_day = float(custom_goal)
+            client_to_meet = max(client_per_day - float(today_hours or 0), 0.0)
+        else:
+            client_per_day = hours_per_day(remaining, days_left, days_off=off)
+            client_to_meet = hours_to_meet_day_goal(
+                worked, today_hours, target, days_left, days_off=off
+            )
         parts.append(f"client {format_hm_per_day(client_per_day)}")
 
     app_to_meet = 0.0
@@ -331,6 +340,7 @@ def format_pace_tooltip(
     app_today_hours=0.0,
     app_active_elapsed=0.0,
     days_off=None,
+    custom_goal=None,
 ):
     """Multi-line breakdown: remaining/target/pace per goal, today's progress,
     and a combined 'need more today' line whose finish/halfway times include
@@ -418,6 +428,21 @@ def format_pace_tooltip(
                 need_line += f" (halfway {halfway})"
         lines.append(need_line)
 
+    if custom_goal is not None and not client_done:
+        custom_to_meet = max(float(custom_goal) - float(today_hours or 0), 0.0)
+        custom_line = f"Custom goal: {format_hm(custom_goal)} today"
+        if custom_to_meet <= 0:
+            custom_line += " (met)"
+        else:
+            custom_line += f" → {format_hm(custom_to_meet)} more"
+            custom_finish = finish_by_datetime(now, custom_to_meet + app_to_meet)
+            if custom_finish is not None:
+                custom_line += f", done {format_clock(custom_finish)}"
+            custom_half = halfway_clock_label(now, custom_goal, today_hours)
+            if custom_half:
+                custom_line += f" (halfway {custom_half})"
+        lines.append(custom_line)
+
     if not client_done:
         no_off_per_day = hours_per_day(remaining, days_left, days_off=0)
         no_off_to_meet = hours_to_meet_day_goal(
@@ -465,6 +490,35 @@ def save_position(x, y):
     try:
         with open(POSITION_PATH, "w", encoding="utf-8") as f:
             f.write(f"{x},{y}")
+    except Exception:
+        pass
+
+
+def load_custom_goal(today):
+    """Return today's custom client goal in hours, or None. A goal saved on an
+    earlier day is discarded (and its file removed) so it resets each day."""
+    try:
+        with open(CUSTOM_GOAL_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("date") == today.isoformat() and float(data["hours"]) > 0:
+            return float(data["hours"])
+    except Exception:
+        return None
+    clear_custom_goal()
+    return None
+
+
+def save_custom_goal(today, hours):
+    try:
+        with open(CUSTOM_GOAL_PATH, "w", encoding="utf-8") as f:
+            json.dump({"date": today.isoformat(), "hours": float(hours)}, f)
+    except Exception:
+        pass
+
+
+def clear_custom_goal():
+    try:
+        CUSTOM_GOAL_PATH.unlink()
     except Exception:
         pass
 
@@ -597,6 +651,9 @@ class Widget:
         self.hours_tip = HoverTip(self.hours_label)
 
         self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label="Set custom goal...", command=lambda: self.root.after(50, self.set_custom_goal))
+        self.menu.add_command(label="Clear custom goal", command=lambda: self.root.after(50, self.clear_custom_goal))
+        self.menu.add_separator()
         self.menu.add_command(label="Refresh hours", command=self.refresh_hours_async)
         self.menu.add_command(label="Reload config", command=self.reload)
         self.menu.add_command(label="Open config file", command=self.open_config)
@@ -662,6 +719,54 @@ class Widget:
         finally:
             self.menu.grab_release()
 
+    def set_custom_goal(self):
+        today = datetime.now(self.tz).date()
+        current = load_custom_goal(today)
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Custom goal")
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+        tk.Label(dlg, text="Client hours to work today:").pack(padx=12, pady=(12, 4))
+        var = tk.StringVar(value="" if current is None else f"{current:g}")
+        entry = tk.Entry(dlg, textvariable=var, width=10, justify="center")
+        entry.pack(padx=12)
+        err = tk.Label(dlg, text="", fg="#c00000")
+        err.pack()
+
+        def submit(_event=None):
+            try:
+                value = float(var.get().strip())
+                if not 0 < value <= 24:
+                    raise ValueError
+            except ValueError:
+                err.configure(text="Enter hours between 0 and 24")
+                return
+            save_custom_goal(today, value)
+            dlg.destroy()
+            self.render()
+
+        buttons = tk.Frame(dlg)
+        buttons.pack(pady=(0, 12))
+        tk.Button(buttons, text="OK", width=8, command=submit).pack(side="left", padx=4)
+        tk.Button(buttons, text="Cancel", width=8, command=dlg.destroy).pack(side="left", padx=4)
+        dlg.bind("<Return>", submit)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        # Center on the primary screen
+        dlg.update_idletasks()
+        x = (dlg.winfo_screenwidth() - dlg.winfo_reqwidth()) // 2
+        y = (dlg.winfo_screenheight() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{x}+{y}")
+        dlg.lift()
+        dlg.focus_force()
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+    def clear_custom_goal(self):
+        clear_custom_goal()
+        self.render()
+
     def toggle_topmost(self):
         self.root.attributes("-topmost", not bool(self.root.attributes("-topmost")))
 
@@ -703,6 +808,8 @@ class Widget:
         show_hours = bool(self.config.get("show_hours_line", True))
         show_earn = bool(self.config.get("show_earnings_line", True))
 
+        custom_goal = load_custom_goal(today)
+
         if show_hours:
             if self._hours_error:
                 self.hours_label.configure(
@@ -737,6 +844,7 @@ class Widget:
                         app_target=app_target,
                         app_today_hours=app_today_hours,
                         days_off=self.config.get("widget_days_off", 1),
+                        custom_goal=custom_goal,
                     )
                 )
                 if self._worked_hours is not None:
@@ -753,6 +861,7 @@ class Widget:
                             app_today_hours=app_today_hours,
                             app_active_elapsed=app_active_elapsed,
                             days_off=self.config.get("widget_days_off", 1),
+                            custom_goal=custom_goal,
                         )
                     )
                 else:

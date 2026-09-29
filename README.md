@@ -99,6 +99,7 @@ powershell -ExecutionPolicy Bypass -File install_startup.ps1
 ## Interaction
 
 - **Drag** — move the widget; position saved to `.position`
+- **Right-click → Set custom goal…** — enter client hours for today (e.g. 7); the widget line uses it instead of the recommended pace (halfway, left today, done time) and the tooltip gains a `Custom goal` line. It resets automatically the next day (stored in `.custom_goal`); *Clear custom goal* removes it early
 - **Right-click** — Refresh hours, Reload config, Open config, Toggle always-on-top, Exit
 - Active-timer UI updates every **60 seconds**
 - Notion data refreshes every `notion_refresh_minutes` (default 15)
